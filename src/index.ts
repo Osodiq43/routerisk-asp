@@ -112,6 +112,12 @@ app.get("/health", (req, res) => {
 });
 
 app.get("/mcp", (req, res) => {
+  // Gracefully handles direct ping checking requests from platform platform reviews
+  if (req.headers.accept !== "text/event-stream" && !req.query.sessionId) {
+    res.setHeader("Content-Type", "text/plain");
+    return res.status(200).send("RouteRisk MCP Server Endpoint Online. Awaiting SSE connections.");
+  }
+
   const sessionId = Math.random().toString(36).substring(2);
   const messageUrl = `/mcp/messages?sessionId=${sessionId}`;
 
@@ -144,7 +150,10 @@ app.post("/mcp/messages", express.json(), async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.error(`RouteRisk MCP Security Firewall online and listening on port ${PORT}`);
+
+const PORT = Number(process.env.PORT) || 7860;
+
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.error(`RouteRisk MCP Security Firewall online and listening on http://0.0.0.0:${PORT}`);
 });
