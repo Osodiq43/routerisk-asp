@@ -22,7 +22,7 @@ function buildMcpServer(): Server {
       tools: [
         {
           name: "check_route_safety",
-          description: "Evaluates on-chain swap routing paths for liquidity depth scaling, price impact, and concentration anomalies before trade execution.",
+          description: "Summary:\nAnalyzes onchain dex trade swap routing paths for anomalies.\n\nInput requirements:\nTarget blockchain token addresses and full swap route path array payload.",
           inputSchema: {
             type: "object",
             properties: {
@@ -107,18 +107,25 @@ const app = express();
 const activeTransports = new Map<string, SSEServerTransport>();
 const activeServers = new Map<string, Server>();
 
+let fallbackTransport: SSEServerTransport | null = null;
+let fallbackServer: Server | null = null;
+
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "healthy", timestamp: new Date().toISOString() });
 });
 
 app.get("/mcp", (req, res) => {
-  // Gracefully handles direct ping checking requests from platform platform reviews
   if (req.headers.accept !== "text/event-stream" && !req.query.sessionId) {
     res.setHeader("Content-Type", "text/plain");
     return res.status(200).send("RouteRisk MCP Server Endpoint Online. Awaiting SSE connections.");
   }
 
-  const sessionId = Math.random().toString(36).substring(2);
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+
+  const sessionId = req.query.sessionId as string || Math.random().toString(36).substring(2);
   const messageUrl = `/mcp/messages?sessionId=${sessionId}`;
 
   const transport = new SSEServerTransport(messageUrl, res as any);
@@ -126,22 +133,34 @@ app.get("/mcp", (req, res) => {
 
   activeTransports.set(sessionId, transport);
   activeServers.set(sessionId, server);
+  
+  fallbackTransport = transport;
+  fallbackServer = server;
 
   server.connect(transport).catch((error) => {
     console.error(`Failed to connect session ${sessionId} to transport:`, error);
     activeTransports.delete(sessionId);
     activeServers.delete(sessionId);
+    if (fallbackTransport === transport) fallbackTransport = null;
+    if (fallbackServer === server) fallbackServer = null;
   });
 
   req.on("close", () => {
     activeTransports.delete(sessionId);
     activeServers.delete(sessionId);
+    if (fallbackTransport === transport) fallbackTransport = null;
+    if (fallbackServer === server) fallbackServer = null;
   });
 });
 
 app.post("/mcp/messages", express.json(), async (req, res) => {
   const sessionId = req.query.sessionId as string;
-  const transport = activeTransports.get(sessionId);
+  let transport = activeTransports.get(sessionId);
+
+  if (!transport && fallbackTransport) {
+    console.error(`Session ${sessionId} not in local map. Using global instance fallback transport.`);
+    transport = fallbackTransport;
+  }
 
   if (transport) {
     await transport.handlePostMessage(req, res);
@@ -150,9 +169,8 @@ app.post("/mcp/messages", express.json(), async (req, res) => {
   }
 });
 
-
-const PORT = Number(process.env.PORT) || 7860;
-
+// Changed default fallback to 8080 to match standard Fly.io web environments
+const PORT = Number(process.env.PORT) || 8080;
 
 app.listen(PORT, "0.0.0.0", () => {
   console.error(`RouteRisk MCP Security Firewall online and listening on http://0.0.0.0:${PORT}`);
