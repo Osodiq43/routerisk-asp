@@ -115,9 +115,21 @@ app.get("/health", (req, res) => {
 });
 
 app.get("/mcp", (req, res) => {
+  // --- TRACKER START ---
+  console.error("======= INCOMING ENDPOINT PING =======");
+  console.error(`Method: ${req.method} | URL: ${req.originalUrl}`);
+  console.error("Headers:", JSON.stringify(req.headers, null, 2));
+  console.error("======================================");
+  // --- TRACKER END ---
+
+  // Check if it's a verification request without SSE stream headers
   if (req.headers.accept !== "text/event-stream" && !req.query.sessionId) {
-    res.setHeader("Content-Type", "text/plain");
-    return res.status(200).send("RouteRisk MCP Server Endpoint Online. Awaiting SSE connections.");
+    // Return clean JSON instead of text/plain
+    return res.status(200).json({
+      status: "online",
+      serviceType: "A2MCP",
+      message: "RouteRisk MCP Server Endpoint Online. Awaiting tool configuration or SSE connection handshakes."
+    });
   }
 
   res.setHeader("Content-Type", "text/event-stream");
@@ -169,7 +181,6 @@ app.post("/mcp/messages", express.json(), async (req, res) => {
   }
 });
 
-// Changed default fallback to 8080 to match standard Fly.io web environments
 const PORT = Number(process.env.PORT) || 8080;
 
 app.listen(PORT, "0.0.0.0", () => {
