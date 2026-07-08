@@ -3,6 +3,7 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import express from "express";
+import cors from "cors";
 import { OKXDexService } from "./services/okx-dex.js";
 import { RouteRiskEngine } from "./engine.js";
 import { RiskSynthesizer } from "./llm.js";
@@ -104,6 +105,10 @@ function buildMcpServer(): Server {
 }
 
 const app = express();
+
+// Enable global CORS to allow browser environments like MCP Inspector to connect seamlessly
+app.use(cors({ origin: "*" }));
+
 const activeTransports = new Map<string, SSEServerTransport>();
 const activeServers = new Map<string, Server>();
 
