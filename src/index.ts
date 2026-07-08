@@ -4,6 +4,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprot
 import { z } from "zod";
 import express from "express";
 import cors from "cors";
+import { exec } from "child_process";
 import { OKXDexService } from "./services/okx-dex.js";
 import { RouteRiskEngine } from "./engine.js";
 import { RiskSynthesizer } from "./llm.js";
@@ -60,26 +61,26 @@ function buildMcpServer(): Server {
         };
       }
 
-      console.error("Resolving token info (decimals + symbol) for the source token...");
+      console.error("Resolving token info for source token...");
       const fromTokenInfo = await dexService.getTokenInfo(args.chainId, args.fromTokenAddress);
 
       const quote = await dexService.getRouteQuote(args.chainId, args.fromTokenAddress, args.toTokenAddress, args.realAmount);
 
       const probeAmount = (BigInt(args.realAmount) / 100n).toString();
-      console.error(`Firing probe quote (1% of real size = ${probeAmount} base units)...`);
+      console.error(`Firing probe quote (1% size = ${probeAmount} base units)...`);
       const probe = await dexService.getImpactScalingRisk(args.chainId, args.fromTokenAddress, args.toTokenAddress, probeAmount);
 
       let sentiment;
       if (fromTokenInfo.symbol) {
-        console.error(`Fetching social sentiment for resolved symbol: ${fromTokenInfo.symbol}...`);
+        console.error(`Fetching social sentiment for symbol: ${fromTokenInfo.symbol}...`);
         sentiment = await dexService.getSocialSentiment(fromTokenInfo.symbol);
       } else {
-        console.error("Could not resolve a token symbol - skipping sentiment lookup.");
+        console.error("Skipping sentiment lookup - token symbol unresolved.");
       }
 
       const finalAnalysisReport = riskEngine.analyzeRoute(quote, probe.probeImpact, probe.isLiveData, sentiment);
 
-      console.error("Generating AI natural language security summary via Groq...");
+      console.error("Generating natural language security summary...");
       const aiBrief = await riskLLM.synthesize(finalAnalysisReport);
 
       const fullResultPayload = {
@@ -105,9 +106,8 @@ function buildMcpServer(): Server {
 }
 
 const app = express();
-
-// Enable global CORS to allow browser environments like MCP Inspector to connect seamlessly
 app.use(cors({ origin: "*" }));
+app.use(express.json());
 
 const activeTransports = new Map<string, SSEServerTransport>();
 const activeServers = new Map<string, Server>();
@@ -115,24 +115,59 @@ const activeServers = new Map<string, Server>();
 let fallbackTransport: SSEServerTransport | null = null;
 let fallbackServer: Server | null = null;
 
+const activeCommercialTasks = new Map<string, any>();
+
+// x402 pricing validation endpoint
+app.post("/x402/validate", (req, res) => {
+  const { buyerAgentId } = req.body;
+  console.error(`[x402]: Incoming verification from Agent #${buyerAgentId || "Unknown"}`);
+
+  res.status(200).json({
+    valid: true,
+    fee: "0",
+    currency: "USDT",
+    paymentMode: "free_tier",
+    message: "Validation pass. Zero-fee tier operational."
+  });
+});
+
+// Sync channel for direct task acceptance
+app.post("/mcp/action/direct-accept", (req, res) => {
+  const { taskId, buyerAgentId, paymentDetails } = req.body;
+  console.error(`[Commerce]: Task #${taskId} accepted.`);
+
+  activeCommercialTasks.set(taskId, {
+    status: "accepted",
+    buyerAgentId,
+    timestamp: new Date().toISOString(),
+    paymentDetails
+  });
+
+  res.status(200).json({
+    ok: true,
+    message: "Channel successfully opened."
+  });
+});
+
+// Diagnostics path for checking task states
+app.get("/mcp/tasks/:taskId", (req, res) => {
+  const task = activeCommercialTasks.get(req.params.taskId);
+  if (!task) {
+    return res.status(404).json({ ok: false, error: "Task reference not found." });
+  }
+  res.status(200).json({ ok: true, data: task });
+});
+
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "healthy", timestamp: new Date().toISOString() });
 });
 
 app.get("/mcp", (req, res) => {
-  // --- TRACKER START ---
-  console.error("======= INCOMING ENDPOINT PING =======");
-  console.error(`Method: ${req.method} | URL: ${req.originalUrl}`);
-  console.error("Headers:", JSON.stringify(req.headers, null, 2));
-  console.error("======================================");
-  // --- TRACKER END ---
-
-  // Check if it's a verification request without SSE stream headers
   if (req.headers.accept !== "text/event-stream" && !req.query.sessionId) {
     return res.status(200).json({
       status: "online",
       serviceType: "A2MCP",
-      message: "RouteRisk MCP Server Endpoint Online. Awaiting tool configuration or SSE connection handshakes."
+      message: "RouteRisk MCP Server Endpoint Online."
     });
   }
 
@@ -154,7 +189,7 @@ app.get("/mcp", (req, res) => {
   fallbackServer = server;
 
   server.connect(transport).catch((error) => {
-    console.error(`Failed to connect session ${sessionId} to transport:`, error);
+    console.error(`Failed to connect session ${sessionId}:`, error);
     activeTransports.delete(sessionId);
     activeServers.delete(sessionId);
     if (fallbackTransport === transport) fallbackTransport = null;
@@ -169,25 +204,43 @@ app.get("/mcp", (req, res) => {
   });
 });
 
-app.post("/mcp/messages", express.json(), async (req, res) => {
+app.post("/mcp/messages", (req, res) => {
   const sessionId = req.query.sessionId as string;
   let transport = activeTransports.get(sessionId);
 
   if (!transport && fallbackTransport) {
-    console.error(`Session ${sessionId} not in local map. Using global instance fallback transport.`);
     transport = fallbackTransport;
   }
 
   if (transport) {
-    // FIX: Pass req.body explicitly to prevent stream unreadable error
-    await transport.handlePostMessage(req, res, req.body);
+    transport.handlePostMessage(req, res, req.body);
   } else {
-    res.status(400).send("No active SSE session found for this sessionId.");
+    res.status(400).send("No active SSE session found.");
   }
 });
+
+function startHeartbeatLoop() {
+  runHeartbeat();
+  setInterval(runHeartbeat, 3 * 60 * 1000);
+}
+
+function runHeartbeat() {
+  exec("onchainos agent heartbeat", (error, stdout, stderr) => {
+    if (error) {
+      console.error(`[Heartbeat Error]: ${error.message}`);
+      return;
+    }
+    if (stderr && !stderr.includes("warn")) {
+      console.error(`[Heartbeat Warning]: ${stderr.trim()}`);
+      return;
+    }
+    console.error(`[Heartbeat Sync]: ${stdout.trim() || "Pulse signaled online."}`);
+  });
+}
 
 const PORT = Number(process.env.PORT) || 8080;
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.error(`RouteRisk MCP Security Firewall online and listening on http://0.0.0.0:${PORT}`);
+  console.error(`RouteRisk MCP Security Firewall online on port ${PORT}`);
+  startHeartbeatLoop();
 });
