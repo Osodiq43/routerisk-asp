@@ -124,7 +124,6 @@ app.get("/mcp", (req, res) => {
 
   // Check if it's a verification request without SSE stream headers
   if (req.headers.accept !== "text/event-stream" && !req.query.sessionId) {
-    // Return clean JSON instead of text/plain
     return res.status(200).json({
       status: "online",
       serviceType: "A2MCP",
@@ -175,7 +174,8 @@ app.post("/mcp/messages", express.json(), async (req, res) => {
   }
 
   if (transport) {
-    await transport.handlePostMessage(req, res);
+    // FIX: Pass req.body explicitly to prevent stream unreadable error
+    await transport.handlePostMessage(req, res, req.body);
   } else {
     res.status(400).send("No active SSE session found for this sessionId.");
   }
