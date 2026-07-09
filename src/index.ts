@@ -4,6 +4,9 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprot
 import { z } from "zod";
 import express from "express";
 import cors from "cors";
+import { paymentMiddleware, x402ResourceServer } from "@okxweb3/x402-express";
+import { ExactEvmScheme } from "@okxweb3/x402-evm/exact/server";
+import { OKXFacilitatorClient } from "@okxweb3/x402-core";
 import { OKXDexService } from "./services/okx-dex.js";
 import { RouteRiskEngine } from "./engine.js";
 import { RiskSynthesizer } from "./llm.js";
@@ -62,9 +65,7 @@ function buildMcpServer(): Server {
 
       console.error(`Resolving token info for source token on chainIndex ${args.chainId}...`);
       const fromTokenInfo = await dexService.getTokenInfo(args.chainId, args.fromTokenAddress);
-
       const quote = await dexService.getRouteQuote(args.chainId, args.fromTokenAddress, args.toTokenAddress, args.realAmount);
-
       const probeAmount = (BigInt(args.realAmount) / 100n).toString();
       console.error(`Firing probe quote (1% size = ${probeAmount} base units)...`);
       const probe = await dexService.getImpactScalingRisk(args.chainId, args.fromTokenAddress, args.toTokenAddress, probeAmount);
@@ -78,7 +79,6 @@ function buildMcpServer(): Server {
       }
 
       const finalAnalysisReport = riskEngine.analyzeRoute(quote, probe.probeImpact, probe.isLiveData, sentiment);
-
       console.error("Generating natural language security summary...");
       const aiBrief = await riskLLM.synthesize(finalAnalysisReport);
 
@@ -110,72 +110,62 @@ app.use(express.json());
 
 const activeTransports = new Map<string, SSEServerTransport>();
 const activeServers = new Map<string, Server>();
-const activeCommercialTasks = new Map<string, any>();
 
-// x402 pricing validation endpoint
-app.post("/x402/validate", (req, res) => {
-  const { buyerAgentId } = req.body;
-  console.error(`[x402]: Incoming verification from Agent #${buyerAgentId || "Unknown"}`);
+const NETWORK = "eip155:196";
+const PAY_TO = process.env.PAY_TO_ADDRESS || "0x073e2d76e3a309a94663a252793eaf00ca24d7b8";
 
-  res.status(200).json({
-    valid: true,
-    fee: "0",
-    currency: "USDT",
-    paymentMode: "free_tier",
-    message: "Validation pass. Zero-fee tier operational."
-  });
+const facilitatorClient = new OKXFacilitatorClient({
+  apiKey: process.env.OKX_API_KEY || "",
+  secretKey: process.env.OKX_SECRET_KEY || "",
+  passphrase: process.env.OKX_PASSPHRASE || "",
 });
 
-// Sync channel for direct task acceptance
-app.post("/mcp/action/direct-accept", (req, res) => {
-  const { taskId, buyerAgentId, paymentDetails } = req.body;
-  console.error(`[Commerce]: Task #${taskId} accepted.`);
+const resourceServer = new x402ResourceServer(facilitatorClient);
+resourceServer.register(NETWORK, new ExactEvmScheme());
 
-  activeCommercialTasks.set(taskId, {
-    status: "accepted",
-    buyerAgentId,
-    timestamp: new Date().toISOString(),
-    paymentDetails
-  });
-
-  res.status(200).json({
-    ok: true,
-    message: "Channel successfully opened."
-  });
-});
-
-// Diagnostics path for checking task states
-app.get("/mcp/tasks/:taskId", (req, res) => {
-  const task = activeCommercialTasks.get(req.params.taskId);
-  if (!task) {
-    return res.status(404).json({ ok: false, error: "Task reference not found." });
-  }
-  res.status(200).json({ ok: true, data: task });
-});
+app.use(
+  paymentMiddleware(
+    {
+      "GET /mcp": {
+        accepts: [
+          {
+            scheme: "exact",
+            network: NETWORK,
+            payTo: PAY_TO,
+            price: "$0",
+          },
+        ],
+        description: "RouteRisk MCP -- DEX swap route safety scoring. Zero-fee tier.",
+        mimeType: "application/json",
+      },
+    },
+    resourceServer
+  )
+);
 
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "healthy", timestamp: new Date().toISOString() });
 });
 
-app.get("/mcp", (req, res) => {
-  if (req.headers.accept !== "text/event-stream" && !req.query.sessionId) {
-    return res.status(200).json({
-      status: "online",
-      serviceType: "A2MCP",
-      message: "RouteRisk MCP Server Endpoint Online."
-    });
-  }
+app.get("/mcp/status", (req, res) => {
+  res.status(200).json({
+    status: "online",
+    serviceType: "A2MCP",
+    message: "RouteRisk MCP Server Endpoint Online."
+  });
+});
 
+app.get("/mcp", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
 
-  const sessionId = req.query.sessionId as string || Math.random().toString(36).substring(2);
-  const messageUrl = `/mcp/messages?sessionId=${sessionId}`;
-
+  const messageUrl = `/mcp/messages`;
   const transport = new SSEServerTransport(messageUrl, res as any);
-  const server = buildMcpServer(); 
+  const server = buildMcpServer();
+  const sessionId = transport.sessionId;
+  console.error(`[DEBUG] New SSE session opened: "${sessionId}"`);
 
   activeTransports.set(sessionId, transport);
   activeServers.set(sessionId, server);
@@ -187,6 +177,7 @@ app.get("/mcp", (req, res) => {
   });
 
   req.on("close", () => {
+    console.error(`[DEBUG] SSE session closed: "${sessionId}"`);
     activeTransports.delete(sessionId);
     activeServers.delete(sessionId);
   });
@@ -195,7 +186,6 @@ app.get("/mcp", (req, res) => {
 app.post("/mcp/messages", (req, res) => {
   const sessionId = req.query.sessionId as string;
   const transport = activeTransports.get(sessionId);
-
   if (transport) {
     transport.handlePostMessage(req, res, req.body);
   } else {
@@ -204,7 +194,6 @@ app.post("/mcp/messages", (req, res) => {
 });
 
 const PORT = Number(process.env.PORT) || 8080;
-
 app.listen(PORT, "0.0.0.0", () => {
   console.error(`RouteRisk MCP Security Firewall online on port ${PORT}`);
 });
