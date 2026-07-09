@@ -4,7 +4,6 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprot
 import { z } from "zod";
 import express from "express";
 import cors from "cors";
-import { exec } from "child_process";
 import { OKXDexService } from "./services/okx-dex.js";
 import { RouteRiskEngine } from "./engine.js";
 import { RiskSynthesizer } from "./llm.js";
@@ -28,7 +27,7 @@ function buildMcpServer(): Server {
           inputSchema: {
             type: "object",
             properties: {
-              chainId: { type: "string", description: "OKX unique identifier for the target chain index (e.g., '1' for Ethereum, '8453' for Base)" },
+              chainId: { type: "string", description: "OKX unique identifier for the target chain index (e.g., '1' for Ethereum, '196' for XLayer)" },
               fromTokenAddress: { type: "string", description: "Contract address of the token being sold (source token)" },
               toTokenAddress: { type: "string", description: "Contract address of the token being bought (target token)" },
               realAmount: { type: "string", description: "The total trade execution size denominated in raw base units" }
@@ -61,7 +60,7 @@ function buildMcpServer(): Server {
         };
       }
 
-      console.error("Resolving token info for source token...");
+      console.error(`Resolving token info for source token on chainIndex ${args.chainId}...`);
       const fromTokenInfo = await dexService.getTokenInfo(args.chainId, args.fromTokenAddress);
 
       const quote = await dexService.getRouteQuote(args.chainId, args.fromTokenAddress, args.toTokenAddress, args.realAmount);
@@ -111,10 +110,6 @@ app.use(express.json());
 
 const activeTransports = new Map<string, SSEServerTransport>();
 const activeServers = new Map<string, Server>();
-
-let fallbackTransport: SSEServerTransport | null = null;
-let fallbackServer: Server | null = null;
-
 const activeCommercialTasks = new Map<string, any>();
 
 // x402 pricing validation endpoint
@@ -184,33 +179,22 @@ app.get("/mcp", (req, res) => {
 
   activeTransports.set(sessionId, transport);
   activeServers.set(sessionId, server);
-  
-  fallbackTransport = transport;
-  fallbackServer = server;
 
   server.connect(transport).catch((error) => {
     console.error(`Failed to connect session ${sessionId}:`, error);
     activeTransports.delete(sessionId);
     activeServers.delete(sessionId);
-    if (fallbackTransport === transport) fallbackTransport = null;
-    if (fallbackServer === server) fallbackServer = null;
   });
 
   req.on("close", () => {
     activeTransports.delete(sessionId);
     activeServers.delete(sessionId);
-    if (fallbackTransport === transport) fallbackTransport = null;
-    if (fallbackServer === server) fallbackServer = null;
   });
 });
 
 app.post("/mcp/messages", (req, res) => {
   const sessionId = req.query.sessionId as string;
-  let transport = activeTransports.get(sessionId);
-
-  if (!transport && fallbackTransport) {
-    transport = fallbackTransport;
-  }
+  const transport = activeTransports.get(sessionId);
 
   if (transport) {
     transport.handlePostMessage(req, res, req.body);
@@ -219,28 +203,8 @@ app.post("/mcp/messages", (req, res) => {
   }
 });
 
-function startHeartbeatLoop() {
-  runHeartbeat();
-  setInterval(runHeartbeat, 3 * 60 * 1000);
-}
-
-function runHeartbeat() {
-  exec("onchainos agent heartbeat", (error, stdout, stderr) => {
-    if (error) {
-      console.error(`[Heartbeat Error]: ${error.message}`);
-      return;
-    }
-    if (stderr && !stderr.includes("warn")) {
-      console.error(`[Heartbeat Warning]: ${stderr.trim()}`);
-      return;
-    }
-    console.error(`[Heartbeat Sync]: ${stdout.trim() || "Pulse signaled online."}`);
-  });
-}
-
 const PORT = Number(process.env.PORT) || 8080;
 
 app.listen(PORT, "0.0.0.0", () => {
   console.error(`RouteRisk MCP Security Firewall online on port ${PORT}`);
-  startHeartbeatLoop();
 });
