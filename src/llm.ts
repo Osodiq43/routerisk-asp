@@ -22,7 +22,6 @@ export class RiskSynthesizer {
       };
     }
 
-    // Check key early and jump cleanly to fallback without breaking the runtime pipeline
     if (!this.apiKey) {
       console.warn("[WARN - RiskSynthesizer]: GROQ_API_KEY is blank. Using local fallback module.");
       return { ...this.templatedFallback(report), isLiveSynthesis: false };
@@ -31,7 +30,6 @@ export class RiskSynthesizer {
     try {
       const prompt = this.buildPrompt(report);
       
-      // Implement a fast request timeout to prevent permanent hanging
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000);
 
@@ -90,17 +88,22 @@ Social sentiment: ${report.threatVectors.socialSentimentRisk}`;
   }
 
   private parseModelOutput(text: string): { summary: string; recommendedAction: string } {
-    const summaryMatch = text.match(/SUMMARY:\s*(.+?)(?=\nACTION:|$)/s);
-    const actionMatch = text.match(/ACTION:\s*(.+)/s);
+    // Made case-insensitive /i and tolerant of varied text outputs
+    const summaryMatch = text.match(/SUMMARY:\s*(.+?)(?=\n(?:ACTION|SUMMARY):|$)/is);
+    const actionMatch = text.match(/ACTION:\s*(.+)/is);
     
-    if (!summaryMatch || !actionMatch) {
-      console.warn("[WARN]: Model response format mismatched rules. Falling back.");
-      throw new Error("Unparseable Groq output format structure");
+    if (summaryMatch && actionMatch) {
+      return {
+        summary: summaryMatch[1].trim(),
+        recommendedAction: actionMatch[1].trim(),
+      };
     }
-    
+
+    console.warn("[WARN]: Model layout match failed. Using raw block separation.");
+    // Emergency clean fallback strategy if model ignores markdown headers completely
     return {
-      summary: summaryMatch[1].trim(),
-      recommendedAction: actionMatch[1].trim(),
+      summary: text.replace(/(SUMMARY|ACTION):/gi, "").substring(0, 150).trim(),
+      recommendedAction: "Review route verification engine parameters manually."
     };
   }
 
