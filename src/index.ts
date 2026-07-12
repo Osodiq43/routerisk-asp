@@ -79,8 +79,28 @@ function buildMcpServer(): Server {
       }
 
       const finalAnalysisReport = riskEngine.analyzeRoute(quote, probe.probeImpact, probe.isLiveData, sentiment);
+      
       console.error("Generating natural language security summary...");
-      const aiBrief = await riskLLM.synthesize(finalAnalysisReport);
+      let aiBrief;
+      
+      try {
+        // Safe racing promise with explicit error bubble interception to ensure visibility
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("LLM synthesis request connection timed out after 6 seconds")), 6000)
+        );
+        
+        aiBrief = await Promise.race([
+          riskLLM.synthesize(finalAnalysisReport),
+          timeoutPromise
+        ]) as any;
+      } catch (llmError: any) {
+        console.error(`[EXPLICIT ERROR CAUGHT - LLM CALL FAILED]: ${llmError.stack || llmError.message}`);
+        aiBrief = {
+          summary: `Route evaluated with safety score ${finalAnalysisReport.safetyScore}/100. Verification Status: ${finalAnalysisReport.status}. (AI Summary Generation Offline)`,
+          recommendedAction: finalAnalysisReport.status === "REJECTED" ? "Execution blocked by system policy." : "Proceed with extra routing slippage protection buffers.",
+          isLiveSynthesis: false
+        };
+      }
 
       const fullResultPayload = {
         ...finalAnalysisReport,
@@ -94,6 +114,7 @@ function buildMcpServer(): Server {
       };
 
     } catch (error: any) {
+      console.error(`[CRITICAL MCP TOOL EXCEPTION]: ${error.stack || error.message}`);
       return {
         content: [{ type: "text", text: `Internal MCP Server Error: ${error.message}` }],
         isError: true
