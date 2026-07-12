@@ -22,12 +22,19 @@ export class RiskSynthesizer {
       };
     }
 
-    try {
-      if (!this.apiKey) {
-        throw new Error("Missing GROQ_API_KEY inside your local environment layout.");
-      }
+    // Check key early and jump cleanly to fallback without breaking the runtime pipeline
+    if (!this.apiKey) {
+      console.warn("[WARN - RiskSynthesizer]: GROQ_API_KEY is blank. Using local fallback module.");
+      return { ...this.templatedFallback(report), isLiveSynthesis: false };
+    }
 
+    try {
       const prompt = this.buildPrompt(report);
+      
+      // Implement a fast request timeout to prevent permanent hanging
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+
       const response = await fetch(this.endpoint, {
         method: "POST",
         headers: {
@@ -40,18 +47,23 @@ export class RiskSynthesizer {
           temperature: 0.1,
           max_tokens: 250,
         }),
+        signal: controller.signal
       });
 
-      if (!response.ok) throw new Error(`Groq HTTP ${response.status}`);
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error(`Groq API returned HTTP status ${response.status}`);
+      }
 
       const data = await response.json() as any;
       const text = data?.choices?.[0]?.message?.content;
-      if (!text) throw new Error("Empty Groq response");
+      if (!text) throw new Error("Empty text returned from Groq response channel");
 
       const parsed = this.parseModelOutput(text);
       return { ...parsed, isLiveSynthesis: true };
     } catch (e: any) {
-      console.error(`[FALLBACK TRIGGERED - RiskSynthesizer]: ${e.message}`);
+      console.warn(`[API FALLBACK - RiskSynthesizer]: ${e.message || "Unknown error"}`);
       return { ...this.templatedFallback(report), isLiveSynthesis: false };
     }
   }
@@ -80,7 +92,12 @@ Social sentiment: ${report.threatVectors.socialSentimentRisk}`;
   private parseModelOutput(text: string): { summary: string; recommendedAction: string } {
     const summaryMatch = text.match(/SUMMARY:\s*(.+?)(?=\nACTION:|$)/s);
     const actionMatch = text.match(/ACTION:\s*(.+)/s);
-    if (!summaryMatch || !actionMatch) throw new Error("Unparseable Groq output format");
+    
+    if (!summaryMatch || !actionMatch) {
+      console.warn("[WARN]: Model response format mismatched rules. Falling back.");
+      throw new Error("Unparseable Groq output format structure");
+    }
+    
     return {
       summary: summaryMatch[1].trim(),
       recommendedAction: actionMatch[1].trim(),
