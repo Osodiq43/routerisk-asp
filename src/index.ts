@@ -15,6 +15,13 @@ const dexService = new OKXDexService();
 const riskEngine = new RouteRiskEngine();
 const riskLLM = new RiskSynthesizer();
 
+// Safe JSON Stringify helper that prevents BigInt crashes
+function safeJsonStringify(obj: any): string {
+  return JSON.stringify(obj, (_, value) =>
+    typeof value === "bigint" ? value.toString() : value
+  , 2);
+}
+
 function buildMcpServer(): Server {
   const server = new Server(
     { name: "routerisk-firewall", version: "1.0.0" },
@@ -55,6 +62,8 @@ function buildMcpServer(): Server {
         realAmount: z.string()
       }).parse(request.params.arguments);
 
+      console.error(`[DEBUG INPUTS]: ${JSON.stringify(args)}`);
+
       const chainOk = await dexService.isChainSupported(args.chainId);
       if (!chainOk) {
         return {
@@ -65,26 +74,32 @@ function buildMcpServer(): Server {
 
       console.error(`Resolving token info for source token on chainIndex ${args.chainId}...`);
       const fromTokenInfo = await dexService.getTokenInfo(args.chainId, args.fromTokenAddress);
+      console.error(`[TOKEN INFO RESULT]: ${safeJsonStringify(fromTokenInfo)}`);
+
       const quote = await dexService.getRouteQuote(args.chainId, args.fromTokenAddress, args.toTokenAddress, args.realAmount);
+      console.error(`[ROUTE QUOTE RESULT]: ${safeJsonStringify(quote)}`);
+
       const probeAmount = (BigInt(args.realAmount) / 100n).toString();
       console.error(`Firing probe quote (1% size = ${probeAmount} base units)...`);
       const probe = await dexService.getImpactScalingRisk(args.chainId, args.fromTokenAddress, args.toTokenAddress, probeAmount);
+      console.error(`[PROBE QUOTE RESULT]: ${safeJsonStringify(probe)}`);
 
       let sentiment;
       if (fromTokenInfo.symbol) {
         console.error(`Fetching social sentiment for symbol: ${fromTokenInfo.symbol}...`);
         sentiment = await dexService.getSocialSentiment(fromTokenInfo.symbol);
+        console.error(`[SENTIMENT RESULT]: ${safeJsonStringify(sentiment)}`);
       } else {
         console.error("Skipping sentiment lookup - token symbol unresolved.");
       }
 
       const finalAnalysisReport = riskEngine.analyzeRoute(quote, probe.probeImpact, probe.isLiveData, sentiment);
+      console.error(`[DETERMINISTIC ENGINE REPORT]: ${safeJsonStringify(finalAnalysisReport)}`);
       
       console.error("Generating natural language security summary...");
       let aiBrief;
       
       try {
-        // Safe racing promise with explicit error bubble interception to ensure visibility
         const timeoutPromise = new Promise((_, reject) =>
           setTimeout(() => reject(new Error("LLM synthesis request connection timed out after 6 seconds")), 6000)
         );
@@ -109,8 +124,10 @@ function buildMcpServer(): Server {
         isAiLive: aiBrief.isLiveSynthesis
       };
 
+      console.error(`[FINAL PAYLOAD DISPATCHING]: ${safeJsonStringify(fullResultPayload)}`);
+
       return {
-        content: [{ type: "text", text: JSON.stringify(fullResultPayload, null, 2) }]
+        content: [{ type: "text", text: safeJsonStringify(fullResultPayload) }]
       };
 
     } catch (error: any) {
@@ -144,7 +161,6 @@ const facilitatorClient = new OKXFacilitatorClient({
 const resourceServer = new x402ResourceServer(facilitatorClient);
 resourceServer.register(NETWORK, new ExactEvmScheme());
 
-// Normalize incoming payment-signature headers exactly like SLA Warden
 app.use((req, res, next) => {
   const rawSig = req.headers["payment-signature"];
   if (rawSig && !req.headers["authorization"]) {

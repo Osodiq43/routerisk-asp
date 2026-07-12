@@ -29,6 +29,7 @@ export class RiskSynthesizer {
 
     try {
       const prompt = this.buildPrompt(report);
+      console.error(`[DEBUG LLM PROMPT SENT TO GROQ]:\n${prompt}`);
       
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000);
@@ -56,6 +57,8 @@ export class RiskSynthesizer {
 
       const data = await response.json() as any;
       const text = data?.choices?.[0]?.message?.content;
+      console.error(`[DEBUG LLM RAW RESPONSE RECEIVED]:\n${text}`);
+
       if (!text) throw new Error("Empty text returned from Groq response channel");
 
       const parsed = this.parseModelOutput(text);
@@ -88,7 +91,6 @@ Social sentiment: ${report.threatVectors.socialSentimentRisk}`;
   }
 
   private parseModelOutput(text: string): { summary: string; recommendedAction: string } {
-    // Made case-insensitive /i and tolerant of varied text outputs
     const summaryMatch = text.match(/SUMMARY:\s*(.+?)(?=\n(?:ACTION|SUMMARY):|$)/is);
     const actionMatch = text.match(/ACTION:\s*(.+)/is);
     
@@ -100,7 +102,6 @@ Social sentiment: ${report.threatVectors.socialSentimentRisk}`;
     }
 
     console.warn("[WARN]: Model layout match failed. Using raw block separation.");
-    // Emergency clean fallback strategy if model ignores markdown headers completely
     return {
       summary: text.replace(/(SUMMARY|ACTION):/gi, "").substring(0, 150).trim(),
       recommendedAction: "Review route verification engine parameters manually."
