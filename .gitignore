@@ -1,3 +1,4 @@
 node_modules
 dist
-.envavatar.jpeg
+.env
+avatar.jpeg

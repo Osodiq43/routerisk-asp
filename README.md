@@ -110,5 +110,3 @@ npm start         # Run production build
 ```
 
 Requires environment variables: `PORT`, `PAY_TO_ADDRESS`, `OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHRASE`, `GROQ_API_KEY`.
-
-```

@@ -123,6 +123,15 @@ const facilitatorClient = new OKXFacilitatorClient({
 const resourceServer = new x402ResourceServer(facilitatorClient);
 resourceServer.register(NETWORK, new ExactEvmScheme());
 
+// Normalize incoming payment-signature headers exactly like SLA Warden
+app.use((req, res, next) => {
+  const rawSig = req.headers["payment-signature"];
+  if (rawSig && !req.headers["authorization"]) {
+    req.headers["authorization"] = String(rawSig).startsWith("Exact ") ? String(rawSig) : `Exact ${rawSig}`;
+  }
+  next();
+});
+
 app.use(
   paymentMiddleware(
     {
