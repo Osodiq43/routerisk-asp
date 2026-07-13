@@ -164,9 +164,11 @@ resourceServer.register(NETWORK, new ExactEvmScheme());
 
 // Header & Query Parameter normalizer middleware
 app.use((req, res, next) => {
-  // Read payment-signature from query parameters (crucial for EventSource/SSE) or request headers
+  // Read payment-signature from query parameters or request headers (narrowing headers arrays safely)
   const querySig = req.query["payment-signature"] as string;
-  const rawSig = querySig || req.headers["payment-signature"];
+  const rawHeader = req.headers["payment-signature"];
+  const headerSig = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
+  const rawSig = querySig || headerSig;
 
   if (rawSig && !req.headers["authorization"]) {
     req.headers["authorization"] = String(rawSig).startsWith("Exact ") 
@@ -219,10 +221,19 @@ app.get("/mcp", (req, res) => {
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
 
+  // Read payment-signature query parameter and resolve headers safely
+  const querySig = req.query["payment-signature"] as string;
+  const rawHeader = req.headers["payment-signature"];
+  const headerSig = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
+  const rawSig = querySig || headerSig || "";
+
   // Dynamically resolve full external schema host address to prevent local SSE redirection errors
   const host = req.headers.host || "localhost:8080";
   const protocol = req.secure || req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
-  const messageUrl = `${protocol}://${host}/mcp/messages`;
+  
+  // Append raw token signature securely as a string to downstream message endpoints
+  const encodedSig = encodeURIComponent(rawSig);
+  const messageUrl = `${protocol}://${host}/mcp/messages?payment-signature=${encodedSig}`;
 
   const transport = new SSEServerTransport(messageUrl as any, res as any);
   const sessionId = transport.sessionId;
