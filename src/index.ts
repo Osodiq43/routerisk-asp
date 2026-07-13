@@ -239,17 +239,14 @@ app.get("/mcp/status", (req, res) => {
 });
 
 app.get("/mcp", (req, res) => {
-  // Set up standard SSE headers
+  // Set up standard SSE headers first, strictly before initializing the SDK transport
   res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
-  
-  // Disable proxy-level buffering for Hugging Face/AWS architecture
   res.setHeader("X-Accel-Buffering", "no");
   res.setHeader("X-Content-Type-Options", "nosniff");
-  res.flushHeaders(); // Flush the connection headers to the client immediately
 
-  // Safely extract the signature regardless of where the user provided it (URL query OR Inspector Headers)
+  // Safely extract the signature regardless of where the user provided it
   const rawSig = extractRawSignature(req);
 
   // Dynamically resolve full external schema host address to prevent local SSE redirection errors
@@ -260,6 +257,7 @@ app.get("/mcp", (req, res) => {
   const encodedSig = encodeURIComponent(rawSig);
   const messageUrl = `${protocol}://${host}/mcp/messages?payment-signature=${encodedSig}`;
 
+  // Initialize transport and let the SDK bind to the active HTTP response
   const transport = new SSEServerTransport(messageUrl as any, res as any);
   const sessionId = transport.sessionId;
   console.error(`[DEBUG] New SSE session opened: "${sessionId}"`);
@@ -270,14 +268,33 @@ app.get("/mcp", (req, res) => {
   activeTransports.set(sessionId, transport);
   activeServers.set(sessionId, sessionServer);
 
+  // CRITICAL: Force flush a raw event comment immediately to break the proxy buffer lock
+  res.write(": connection_keepalive\n\n");
+  if (typeof (res as any).flush === "function") {
+    (res as any).flush();
+  }
+
   sessionServer.connect(transport).catch((error) => {
     console.error(`Failed to connect session ${sessionId}:`, error);
     activeTransports.delete(sessionId);
     activeServers.delete(sessionId);
   });
 
+  // Keep connection alive with periodic lightweight comments (heartbeats) to keep the proxy warm
+  const heartbeatInterval = setInterval(() => {
+    if (res.writableEnded) {
+      clearInterval(heartbeatInterval);
+      return;
+    }
+    res.write(": heartbeat\n\n");
+    if (typeof (res as any).flush === "function") {
+      (res as any).flush();
+    }
+  }, 15000);
+
   req.on("close", () => {
     console.error(`[DEBUG] SSE session closed: "${sessionId}"`);
+    clearInterval(heartbeatInterval);
     activeTransports.delete(sessionId);
     activeServers.delete(sessionId);
   });
