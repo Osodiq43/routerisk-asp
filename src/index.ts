@@ -162,11 +162,16 @@ const facilitatorClient = new OKXFacilitatorClient({
 const resourceServer = new x402ResourceServer(facilitatorClient);
 resourceServer.register(NETWORK, new ExactEvmScheme());
 
-// Header normalizer middleware
+// Header & Query Parameter normalizer middleware
 app.use((req, res, next) => {
-  const rawSig = req.headers["payment-signature"];
+  // Read payment-signature from query parameters (crucial for EventSource/SSE) or request headers
+  const querySig = req.query["payment-signature"] as string;
+  const rawSig = querySig || req.headers["payment-signature"];
+
   if (rawSig && !req.headers["authorization"]) {
-    req.headers["authorization"] = String(rawSig).startsWith("Exact ") ? String(rawSig) : `Exact ${rawSig}`;
+    req.headers["authorization"] = String(rawSig).startsWith("Exact ") 
+      ? String(rawSig) 
+      : `Exact ${rawSig}`;
   }
   next();
 });
