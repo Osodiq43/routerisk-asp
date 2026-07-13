@@ -22,6 +22,26 @@ function safeJsonStringify(obj: any): string {
   , 2);
 }
 
+// Helper to extract the raw token from query params, payment-signature headers, or Authorization headers
+function extractRawSignature(req: express.Request): string {
+  const querySig = req.query["payment-signature"] as string;
+  if (querySig) return querySig;
+
+  const rawHeader = req.headers["payment-signature"];
+  const headerSig = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
+  if (headerSig) return headerSig;
+
+  const authHeader = req.headers["authorization"];
+  const authSig = Array.isArray(authHeader) ? authHeader[0] : authHeader;
+  if (authSig) {
+    if (authSig.startsWith("Exact ")) {
+      return authSig.substring(6);
+    }
+    return authSig;
+  }
+  return "";
+}
+
 function buildMcpServer(): Server {
   const server = new Server(
     { name: "routerisk-firewall", version: "1.0.0" },
@@ -168,10 +188,7 @@ app.use((req, res, next) => {
   console.error(`[DIAGNOSTIC] Request Query Params: ${JSON.stringify(req.query)}`);
   console.error(`[DIAGNOSTIC] Request Headers: ${JSON.stringify(req.headers)}`);
 
-  const querySig = req.query["payment-signature"] as string;
-  const rawHeader = req.headers["payment-signature"];
-  const headerSig = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
-  const rawSig = querySig || headerSig;
+  const rawSig = extractRawSignature(req);
 
   if (rawSig) {
     const formattedSig = String(rawSig).startsWith("Exact ") ? String(rawSig) : `Exact ${rawSig}`;
@@ -222,22 +239,24 @@ app.get("/mcp/status", (req, res) => {
 });
 
 app.get("/mcp", (req, res) => {
+  // Set up standard SSE headers
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
+  
+  // Disable proxy-level buffering for Hugging Face/AWS architecture
   res.setHeader("X-Accel-Buffering", "no");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.flushHeaders(); // Flush the connection headers to the client immediately
 
-  // Read payment-signature query parameter and resolve headers safely
-  const querySig = req.query["payment-signature"] as string;
-  const rawHeader = req.headers["payment-signature"];
-  const headerSig = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
-  const rawSig = querySig || headerSig || "";
+  // Safely extract the signature regardless of where the user provided it (URL query OR Inspector Headers)
+  const rawSig = extractRawSignature(req);
 
   // Dynamically resolve full external schema host address to prevent local SSE redirection errors
   const host = req.headers.host || "localhost:8080";
   const protocol = req.secure || req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
   
-  // Append raw token signature securely as a string to downstream message endpoints
+  // Append raw token signature securely as a string to downstream message endpoints so JSON-RPC stays authenticated
   const encodedSig = encodeURIComponent(rawSig);
   const messageUrl = `${protocol}://${host}/mcp/messages?payment-signature=${encodedSig}`;
 
