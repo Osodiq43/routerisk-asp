@@ -22,26 +22,6 @@ function safeJsonStringify(obj: any): string {
   , 2);
 }
 
-// Helper to extract the raw token from query params, payment-signature headers, or Authorization headers
-function extractRawSignature(req: express.Request): string {
-  const querySig = req.query["payment-signature"] as string;
-  if (querySig) return querySig;
-
-  const rawHeader = req.headers["payment-signature"];
-  const headerSig = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
-  if (headerSig) return headerSig;
-
-  const authHeader = req.headers["authorization"];
-  const authSig = Array.isArray(authHeader) ? authHeader[0] : authHeader;
-  if (authSig) {
-    if (authSig.startsWith("Exact ")) {
-      return authSig.substring(6);
-    }
-    return authSig;
-  }
-  return "";
-}
-
 function buildMcpServer(): Server {
   const server = new Server(
     { name: "routerisk-firewall", version: "1.0.0" },
@@ -182,21 +162,11 @@ const facilitatorClient = new OKXFacilitatorClient({
 const resourceServer = new x402ResourceServer(facilitatorClient);
 resourceServer.register(NETWORK, new ExactEvmScheme());
 
-// Header & Query Parameter normalizer middleware with verbose diagnostic logs
+// Header normalizer middleware
 app.use((req, res, next) => {
-  console.error(`[DIAGNOSTIC] Incoming Request: ${req.method} ${req.url}`);
-  console.error(`[DIAGNOSTIC] Request Query Params: ${JSON.stringify(req.query)}`);
-  console.error(`[DIAGNOSTIC] Request Headers: ${JSON.stringify(req.headers)}`);
-
-  const rawSig = extractRawSignature(req);
-
-  if (rawSig) {
-    const formattedSig = String(rawSig).startsWith("Exact ") ? String(rawSig) : `Exact ${rawSig}`;
-    req.headers["authorization"] = formattedSig;
-    req.headers["payment-signature"] = String(rawSig);
-    console.error(`[DIAGNOSTIC] Successfully parsed payment signature. Set Authorization to: ${formattedSig}`);
-  } else {
-    console.error(`[DIAGNOSTIC] WARNING: No payment signature detected on this request!`);
+  const rawSig = req.headers["payment-signature"];
+  if (rawSig && !req.headers["authorization"]) {
+    req.headers["authorization"] = String(rawSig).startsWith("Exact ") ? String(rawSig) : `Exact ${rawSig}`;
   }
   next();
 });
@@ -239,25 +209,16 @@ app.get("/mcp/status", (req, res) => {
 });
 
 app.get("/mcp", (req, res) => {
-  // Set up standard SSE headers first, strictly before initializing the SDK transport
   res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
-  res.setHeader("X-Content-Type-Options", "nosniff");
-
-  // Safely extract the signature regardless of where the user provided it
-  const rawSig = extractRawSignature(req);
 
   // Dynamically resolve full external schema host address to prevent local SSE redirection errors
   const host = req.headers.host || "localhost:8080";
   const protocol = req.secure || req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
-  
-  // Append raw token signature securely as a string to downstream message endpoints so JSON-RPC stays authenticated
-  const encodedSig = encodeURIComponent(rawSig);
-  const messageUrl = `${protocol}://${host}/mcp/messages?payment-signature=${encodedSig}`;
+  const messageUrl = `${protocol}://${host}/mcp/messages`;
 
-  // Initialize transport and let the SDK bind to the active HTTP response
   const transport = new SSEServerTransport(messageUrl as any, res as any);
   const sessionId = transport.sessionId;
   console.error(`[DEBUG] New SSE session opened: "${sessionId}"`);
@@ -268,33 +229,14 @@ app.get("/mcp", (req, res) => {
   activeTransports.set(sessionId, transport);
   activeServers.set(sessionId, sessionServer);
 
-  // CRITICAL: Force flush a raw event comment immediately to break the proxy buffer lock
-  res.write(": connection_keepalive\n\n");
-  if (typeof (res as any).flush === "function") {
-    (res as any).flush();
-  }
-
   sessionServer.connect(transport).catch((error) => {
     console.error(`Failed to connect session ${sessionId}:`, error);
     activeTransports.delete(sessionId);
     activeServers.delete(sessionId);
   });
 
-  // Keep connection alive with periodic lightweight comments (heartbeats) to keep the proxy warm
-  const heartbeatInterval = setInterval(() => {
-    if (res.writableEnded) {
-      clearInterval(heartbeatInterval);
-      return;
-    }
-    res.write(": heartbeat\n\n");
-    if (typeof (res as any).flush === "function") {
-      (res as any).flush();
-    }
-  }, 15000);
-
   req.on("close", () => {
     console.error(`[DEBUG] SSE session closed: "${sessionId}"`);
-    clearInterval(heartbeatInterval);
     activeTransports.delete(sessionId);
     activeServers.delete(sessionId);
   });
