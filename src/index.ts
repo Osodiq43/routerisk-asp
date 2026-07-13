@@ -147,7 +147,9 @@ app.use(cors({ origin: "*" }));
 app.use(express.json());
 
 const activeTransports = new Map<string, SSEServerTransport>();
-const activeServers = new Map<string, Server>();
+
+// Instantiate a single global MCP server instance to handle connections reliably
+const mcpServerInstance = buildMcpServer();
 
 const NETWORK = "eip155:196";
 const PAY_TO = process.env.PAY_TO_ADDRESS || "0x073e2d76e3a309a94663a252793eaf00ca24d7b8";
@@ -161,6 +163,7 @@ const facilitatorClient = new OKXFacilitatorClient({
 const resourceServer = new x402ResourceServer(facilitatorClient);
 resourceServer.register(NETWORK, new ExactEvmScheme());
 
+// Header normalizer middleware
 app.use((req, res, next) => {
   const rawSig = req.headers["payment-signature"];
   if (rawSig && !req.headers["authorization"]) {
@@ -169,25 +172,30 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(
-  paymentMiddleware(
-    {
-      "GET /mcp": {
-        accepts: [
-          {
-            scheme: "exact",
-            network: NETWORK,
-            payTo: PAY_TO,
-            price: "$0",
-          },
-        ],
-        description: "RouteRisk MCP -- DEX swap route safety scoring. Zero-fee tier.",
-        mimeType: "application/json",
+// Conditionally hook OKX x402 billing if not bypassed
+if (process.env.BYPASS_PAYMENT !== "true") {
+  app.use(
+    paymentMiddleware(
+      {
+        "GET /mcp": {
+          accepts: [
+            {
+              scheme: "exact",
+              network: NETWORK,
+              payTo: PAY_TO,
+              price: "$0",
+            },
+          ],
+          description: "RouteRisk MCP -- DEX swap route safety scoring. Zero-fee tier.",
+          mimeType: "application/json",
+        },
       },
-    },
-    resourceServer
-  )
-);
+      resourceServer
+    )
+  );
+} else {
+  console.log("⚠️ Running in FREE 200 mode. Payment middleware bypassed.");
+}
 
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "healthy", timestamp: new Date().toISOString() });
@@ -197,7 +205,7 @@ app.get("/mcp/status", (req, res) => {
   res.status(200).json({
     status: "online",
     serviceType: "A2MCP",
-    message: "RouteRisk MCP Server Endpoint Online."
+    message: `RouteRisk MCP Server Endpoint Online. Mode: ${process.env.BYPASS_PAYMENT === "true" ? "FREE Bypass" : "x402 Active"}`
   });
 });
 
@@ -207,25 +215,25 @@ app.get("/mcp", (req, res) => {
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
 
-  const messageUrl = `/mcp/messages`;
-  const transport = new SSEServerTransport(messageUrl, res as any);
-  const server = buildMcpServer();
+  // Dynamically resolve full external schema host address to prevent local SSE redirection errors
+  const host = req.headers.host || "localhost:8080";
+  const protocol = req.secure || req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
+  const messageUrl = `${protocol}://${host}/mcp/messages`;
+
+  const transport = new SSEServerTransport(messageUrl as any, res as any);
   const sessionId = transport.sessionId;
   console.error(`[DEBUG] New SSE session opened: "${sessionId}"`);
 
   activeTransports.set(sessionId, transport);
-  activeServers.set(sessionId, server);
 
-  server.connect(transport).catch((error) => {
+  mcpServerInstance.connect(transport).catch((error) => {
     console.error(`Failed to connect session ${sessionId}:`, error);
     activeTransports.delete(sessionId);
-    activeServers.delete(sessionId);
   });
 
   req.on("close", () => {
     console.error(`[DEBUG] SSE session closed: "${sessionId}"`);
     activeTransports.delete(sessionId);
-    activeServers.delete(sessionId);
   });
 });
 
@@ -239,7 +247,19 @@ app.post("/mcp/messages", (req, res) => {
   }
 });
 
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+
 const PORT = Number(process.env.PORT) || 8080;
-app.listen(PORT, "0.0.0.0", () => {
-  console.error(`RouteRisk MCP Security Firewall online on port ${PORT}`);
-});
+
+// If explicitly running in production/web mode (like on Hugging Face)
+if (process.env.RUN_EXPRESS === "true" || process.env.NODE_ENV === "production") {
+  app.listen(PORT, "0.0.0.0", () => {
+    console.error(`RouteRisk MCP Security Firewall online on port ${PORT}`);
+  });
+} else {
+  // Use the official SDK Stdio transport for local UI Inspector testing
+  const transport = new StdioServerTransport();
+  mcpServerInstance.connect(transport).catch((error) => {
+    console.error("Failed to connect standard transport:", error);
+  });
+}
