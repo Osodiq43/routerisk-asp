@@ -162,19 +162,24 @@ const facilitatorClient = new OKXFacilitatorClient({
 const resourceServer = new x402ResourceServer(facilitatorClient);
 resourceServer.register(NETWORK, new ExactEvmScheme());
 
-// Header & Query Parameter normalizer middleware
+// Header & Query Parameter normalizer middleware with verbose diagnostic logs
 app.use((req, res, next) => {
-  // Check if the payment-signature was sent via query parameters (SSE/browser) OR headers
+  console.error(`[DIAGNOSTIC] Incoming Request: ${req.method} ${req.url}`);
+  console.error(`[DIAGNOSTIC] Request Query Params: ${JSON.stringify(req.query)}`);
+  console.error(`[DIAGNOSTIC] Request Headers: ${JSON.stringify(req.headers)}`);
+
   const querySig = req.query["payment-signature"] as string;
   const rawHeader = req.headers["payment-signature"];
   const headerSig = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
   const rawSig = querySig || headerSig;
 
   if (rawSig) {
-    // Force set BOTH the expected headers so downstream libraries can find it under any format
     const formattedSig = String(rawSig).startsWith("Exact ") ? String(rawSig) : `Exact ${rawSig}`;
     req.headers["authorization"] = formattedSig;
     req.headers["payment-signature"] = String(rawSig);
+    console.error(`[DIAGNOSTIC] Successfully parsed payment signature. Set Authorization to: ${formattedSig}`);
+  } else {
+    console.error(`[DIAGNOSTIC] WARNING: No payment signature detected on this request!`);
   }
   next();
 });
