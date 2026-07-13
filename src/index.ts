@@ -146,10 +146,9 @@ const app = express();
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
+// Track both active transports and dedicated servers to prevent multi-device instance collisions
 const activeTransports = new Map<string, SSEServerTransport>();
-
-// Instantiate a single global MCP server instance to handle connections reliably
-const mcpServerInstance = buildMcpServer();
+const activeServers = new Map<string, Server>();
 
 const NETWORK = "eip155:196";
 const PAY_TO = process.env.PAY_TO_ADDRESS || "0x073e2d76e3a309a94663a252793eaf00ca24d7b8";
@@ -224,16 +223,22 @@ app.get("/mcp", (req, res) => {
   const sessionId = transport.sessionId;
   console.error(`[DEBUG] New SSE session opened: "${sessionId}"`);
 
-  activeTransports.set(sessionId, transport);
+  // Build a distinct, isolated server instance for this connection session
+  const sessionServer = buildMcpServer();
 
-  mcpServerInstance.connect(transport).catch((error) => {
+  activeTransports.set(sessionId, transport);
+  activeServers.set(sessionId, sessionServer);
+
+  sessionServer.connect(transport).catch((error) => {
     console.error(`Failed to connect session ${sessionId}:`, error);
     activeTransports.delete(sessionId);
+    activeServers.delete(sessionId);
   });
 
   req.on("close", () => {
     console.error(`[DEBUG] SSE session closed: "${sessionId}"`);
     activeTransports.delete(sessionId);
+    activeServers.delete(sessionId);
   });
 });
 
@@ -259,7 +264,8 @@ if (process.env.RUN_EXPRESS === "true" || process.env.NODE_ENV === "production")
 } else {
   // Use the official SDK Stdio transport for local UI Inspector testing
   const transport = new StdioServerTransport();
-  mcpServerInstance.connect(transport).catch((error) => {
+  const localServer = buildMcpServer();
+  localServer.connect(transport).catch((error) => {
     console.error("Failed to connect standard transport:", error);
   });
 }
