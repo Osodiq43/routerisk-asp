@@ -164,16 +164,17 @@ resourceServer.register(NETWORK, new ExactEvmScheme());
 
 // Header & Query Parameter normalizer middleware
 app.use((req, res, next) => {
-  // Read payment-signature from query parameters or request headers (narrowing headers arrays safely)
+  // Check if the payment-signature was sent via query parameters (SSE/browser) OR headers
   const querySig = req.query["payment-signature"] as string;
   const rawHeader = req.headers["payment-signature"];
   const headerSig = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
   const rawSig = querySig || headerSig;
 
-  if (rawSig && !req.headers["authorization"]) {
-    req.headers["authorization"] = String(rawSig).startsWith("Exact ") 
-      ? String(rawSig) 
-      : `Exact ${rawSig}`;
+  if (rawSig) {
+    // Force set BOTH the expected headers so downstream libraries can find it under any format
+    const formattedSig = String(rawSig).startsWith("Exact ") ? String(rawSig) : `Exact ${rawSig}`;
+    req.headers["authorization"] = formattedSig;
+    req.headers["payment-signature"] = String(rawSig);
   }
   next();
 });
