@@ -11,6 +11,18 @@ import { OKXDexService } from "./services/okx-dex.js";
 import { RouteRiskEngine } from "./engine.js";
 import { RiskSynthesizer } from "./llm.js";
 
+// Diagnostic imports
+import crypto from "crypto";
+import os from "os";
+
+// Generate a completely unique fingerprint for this specific node process execution
+const PROCESS_ID = crypto.randomUUID().slice(0, 8);
+const SYSTEM_HOSTNAME = os.hostname();
+console.error(`[DIAGNOSTIC] === SERVER STARTUP ===`);
+console.error(`[DIAGNOSTIC] Process Fingerprint: ${PROCESS_ID}`);
+console.error(`[DIAGNOSTIC] Hostname: ${SYSTEM_HOSTNAME}`);
+console.error(`[DIAGNOSTIC] PID: ${process.pid}`);
+
 const dexService = new OKXDexService();
 const riskEngine = new RouteRiskEngine();
 const riskLLM = new RiskSynthesizer();
@@ -221,13 +233,15 @@ app.get("/mcp", (req, res) => {
 
   const transport = new SSEServerTransport(messageUrl as any, res as any);
   const sessionId = transport.sessionId;
-  console.error(`[DEBUG] New SSE session opened: "${sessionId}"`);
 
   // Build a distinct, isolated server instance for this connection session
   const sessionServer = buildMcpServer();
 
   activeTransports.set(sessionId, transport);
   activeServers.set(sessionId, sessionServer);
+
+  console.error(`[DIAGNOSTIC][GET /mcp] Process [${PROCESS_ID}] on [${SYSTEM_HOSTNAME}] created Session: "${sessionId}"`);
+  console.error(`[DIAGNOSTIC][GET /mcp] Active Session Map on this process: [${[...activeTransports.keys()].join(", ")}]`);
 
   sessionServer.connect(transport).catch((error) => {
     console.error(`Failed to connect session ${sessionId}:`, error);
@@ -236,7 +250,7 @@ app.get("/mcp", (req, res) => {
   });
 
   req.on("close", () => {
-    console.error(`[DEBUG] SSE session closed: "${sessionId}"`);
+    console.error(`[DIAGNOSTIC][CLOSE /mcp] Process [${PROCESS_ID}] closed Session: "${sessionId}"`);
     activeTransports.delete(sessionId);
     activeServers.delete(sessionId);
   });
@@ -244,11 +258,18 @@ app.get("/mcp", (req, res) => {
 
 app.post("/mcp/messages", (req, res) => {
   const sessionId = req.query.sessionId as string;
+
+  console.error(`[DIAGNOSTIC][POST] Incoming message to Process [${PROCESS_ID}] on [${SYSTEM_HOSTNAME}]`);
+  console.error(`[DIAGNOSTIC][POST] Target Session ID: "${sessionId}"`);
+  console.error(`[DIAGNOSTIC][POST] Known Session IDs in memory on THIS process: [${[...activeTransports.keys()].join(", ")}]`);
+
   const transport = activeTransports.get(sessionId);
   if (transport) {
+    console.error(`[DIAGNOSTIC][POST] MATCH FOUND on Process [${PROCESS_ID}]. Routing payload.`);
     transport.handlePostMessage(req, res, req.body);
   } else {
-    res.status(400).send("No active SSE session found.");
+    console.error(`[DIAGNOSTIC][POST] MISMATCH! Process [${PROCESS_ID}] has no record of "${sessionId}". Sending 400.`);
+    res.status(400).send(`No active SSE session found on process ${PROCESS_ID}.`);
   }
 });
 
