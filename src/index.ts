@@ -220,6 +220,14 @@ app.get("/mcp/status", (req, res) => {
   });
 });
 
+// Unbuffered json endpoint to read active sessions from process memory
+app.get("/mcp/active-sessions", (req, res) => {
+  res.status(200).json({
+    processId: PROCESS_ID,
+    activeSessionIds: Array.from(activeTransports.keys())
+  });
+});
+
 app.get("/mcp", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
