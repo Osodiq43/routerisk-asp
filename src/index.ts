@@ -1,6 +1,6 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"; // Added missing import
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import express from "express";
@@ -51,6 +51,22 @@ const originalConsoleError = console.error;
 const originalConsoleLog = console.log;
 
 function broadcastLog(message: string) {
+  // Strict architectural filter to drop all process setup, routing maps, and infrastructure noise
+  if (
+    message.includes("[DIAGNOSTIC]") || 
+    message.includes("=== SERVER STARTUP ===") || 
+    message.includes("Hostname:") || 
+    message.includes("PID:") || 
+    message.includes("Active Session Map") || 
+    message.includes("Incoming message to Process") ||
+    message.includes("Target Session ID:") ||
+    message.includes("Known Session IDs in memory") ||
+    message.includes("MATCH FOUND on Process") ||
+    message.includes("online on port")
+  ) {
+    return;
+  }
+
   const store = logLocalStorage.getStore();
   
   if (store) {
@@ -60,15 +76,6 @@ function broadcastLog(message: string) {
     if (targetClientId) {
       wsClients.forEach((wsClientId, clientWs) => {
         if (wsClientId === targetClientId && clientWs.readyState === WebSocket.OPEN) {
-          clientWs.send(message);
-        }
-      });
-    }
-  } else {
-    // Broadcast process lifecycle events (e.g., startup/shutdown) to all connected logs
-    if (message.includes("=== SERVER STARTUP ===") || message.includes("online on port")) {
-      wsClients.forEach((_, clientWs) => {
-        if (clientWs.readyState === WebSocket.OPEN) {
           clientWs.send(message);
         }
       });
@@ -136,7 +143,7 @@ function buildMcpServer(sessionId: string): Server {
           realAmount: z.string()
         }).parse(request.params.arguments);
 
-        console.error(`[DEBUG INPUTS]: ${JSON.stringify(args)}`);
+        console.error(`[INPUTS]: ${JSON.stringify(args)}`);
 
         const chainOk = await dexService.isChainSupported(args.chainId);
         if (!chainOk) {

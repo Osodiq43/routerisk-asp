@@ -29,7 +29,7 @@ export class RiskSynthesizer {
 
     try {
       const prompt = this.buildPrompt(report);
-      console.error(`[DEBUG LLM PROMPT SENT TO GROQ]:\n${prompt}`);
+      console.error(`[LLM PROMPT SENT TO GROQ]:\n${prompt}`);
       
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000);
@@ -57,7 +57,7 @@ export class RiskSynthesizer {
 
       const data = await response.json() as any;
       const text = data?.choices?.[0]?.message?.content;
-      console.error(`[DEBUG LLM RAW RESPONSE RECEIVED]:\n${text}`);
+      console.error(`[LLM RAW RESPONSE RECEIVED]:\n${text}`);
 
       if (!text) throw new Error("Empty text returned from Groq response channel");
 
