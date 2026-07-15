@@ -1,6 +1,6 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"; // Added missing import
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import express from "express";
@@ -93,7 +93,8 @@ console.error(`[DIAGNOSTIC] Process Fingerprint: ${PROCESS_ID}`);
 console.error(`[DIAGNOSTIC] Hostname: ${SYSTEM_HOSTNAME}`);
 console.error(`[DIAGNOSTIC] PID: ${process.pid}`);
 
-function buildMcpServer(): Server {
+// Modified helper function to pass sessionId down to build scope context dynamically
+function buildMcpServer(sessionId: string): Server {
   const server = new Server(
     { name: "routerisk-firewall", version: "1.0.0" },
     { capabilities: { tools: {} } }
@@ -125,89 +126,91 @@ function buildMcpServer(): Server {
       throw new Error(`Tool ${request.params.name} not found.`);
     }
 
-    try {
-      const args = z.object({
-        chainId: z.string(),
-        fromTokenAddress: z.string(),
-        toTokenAddress: z.string(),
-        realAmount: z.string()
-      }).parse(request.params.arguments);
+    // Force run the entire handler pipeline inside our thread local storage context mapped to sessionId!
+    return logLocalStorage.run({ sessionId }, async () => {
+      try {
+        const args = z.object({
+          chainId: z.string(),
+          fromTokenAddress: z.string(),
+          toTokenAddress: z.string(),
+          realAmount: z.string()
+        }).parse(request.params.arguments);
 
-      console.error(`[DEBUG INPUTS]: ${JSON.stringify(args)}`);
+        console.error(`[DEBUG INPUTS]: ${JSON.stringify(args)}`);
 
-      const chainOk = await dexService.isChainSupported(args.chainId);
-      if (!chainOk) {
+        const chainOk = await dexService.isChainSupported(args.chainId);
+        if (!chainOk) {
+          return {
+            content: [{ type: "text", text: `Chain ${args.chainId} is not in OKX's supported-chain list. Aborting.` }],
+            isError: true
+          };
+        }
+
+        console.error(`Resolving token info for source token on chainIndex ${args.chainId}...`);
+        const fromTokenInfo = await dexService.getTokenInfo(args.chainId, args.fromTokenAddress);
+        console.error(`[TOKEN INFO RESULT]: ${safeJsonStringify(fromTokenInfo)}`);
+
+        const quote = await dexService.getRouteQuote(args.chainId, args.fromTokenAddress, args.toTokenAddress, args.realAmount);
+        console.error(`[ROUTE QUOTE RESULT]: ${safeJsonStringify(quote)}`);
+
+        const probeAmount = (BigInt(args.realAmount) / 100n).toString();
+        console.error(`Firing probe quote (1% size = ${probeAmount} base units)...`);
+        const probe = await dexService.getImpactScalingRisk(args.chainId, args.fromTokenAddress, args.toTokenAddress, probeAmount);
+        console.error(`[PROBE QUOTE RESULT]: ${safeJsonStringify(probe)}`);
+
+        let sentiment;
+        if (fromTokenInfo.symbol) {
+          console.error(`Fetching social sentiment for symbol: ${fromTokenInfo.symbol}...`);
+          sentiment = await dexService.getSocialSentiment(fromTokenInfo.symbol);
+          console.error(`[SENTIMENT RESULT]: ${safeJsonStringify(sentiment)}`);
+        } else {
+          console.error("Skipping sentiment lookup - token symbol unresolved.");
+        }
+
+        const finalAnalysisReport = riskEngine.analyzeRoute(quote, probe.probeImpact, probe.isLiveData, sentiment);
+        console.error(`[DETERMINISTIC ENGINE REPORT]: ${safeJsonStringify(finalAnalysisReport)}`);
+        
+        console.error("Generating natural language security summary...");
+        let aiBrief;
+        
+        try {
+          const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("LLM synthesis request connection timed out after 6 seconds")), 6000)
+          );
+          
+          aiBrief = await Promise.race([
+            riskLLM.synthesize(finalAnalysisReport),
+            timeoutPromise
+          ]) as any;
+        } catch (llmError: any) {
+          console.error(`[EXPLICIT ERROR CAUGHT - LLM CALL FAILED]: ${llmError.stack || llmError.message}`);
+          aiBrief = {
+            summary: `Route evaluated with safety score ${finalAnalysisReport.safetyScore}/100. Verification Status: ${finalAnalysisReport.status}. (AI Summary Generation Offline)`,
+            recommendedAction: finalAnalysisReport.status === "REJECTED" ? "Execution blocked by system policy." : "Proceed with extra routing slippage protection buffers.",
+            isLiveSynthesis: false
+          };
+        }
+
+        const fullResultPayload = {
+          ...finalAnalysisReport,
+          aiSummary: aiBrief.summary,
+          aiRecommendedAction: aiBrief.recommendedAction
+        };
+
+        console.error(`[FINAL PAYLOAD DISPATCHING]: ${safeJsonStringify(fullResultPayload)}`);
+
         return {
-          content: [{ type: "text", text: `Chain ${args.chainId} is not in OKX's supported-chain list. Aborting.` }],
+          content: [{ type: "text", text: safeJsonStringify(fullResultPayload) }]
+        };
+
+      } catch (error: any) {
+        console.error(`[CRITICAL MCP TOOL EXCEPTION]: ${error.stack || error.message}`);
+        return {
+          content: [{ type: "text", text: `Internal MCP Server Error: ${error.message}` }],
           isError: true
         };
       }
-
-      console.error(`Resolving token info for source token on chainIndex ${args.chainId}...`);
-      const fromTokenInfo = await dexService.getTokenInfo(args.chainId, args.fromTokenAddress);
-      console.error(`[TOKEN INFO RESULT]: ${safeJsonStringify(fromTokenInfo)}`);
-
-      const quote = await dexService.getRouteQuote(args.chainId, args.fromTokenAddress, args.toTokenAddress, args.realAmount);
-      console.error(`[ROUTE QUOTE RESULT]: ${safeJsonStringify(quote)}`);
-
-      const probeAmount = (BigInt(args.realAmount) / 100n).toString();
-      console.error(`Firing probe quote (1% size = ${probeAmount} base units)...`);
-      const probe = await dexService.getImpactScalingRisk(args.chainId, args.fromTokenAddress, args.toTokenAddress, probeAmount);
-      console.error(`[PROBE QUOTE RESULT]: ${safeJsonStringify(probe)}`);
-
-      let sentiment;
-      if (fromTokenInfo.symbol) {
-        console.error(`Fetching social sentiment for symbol: ${fromTokenInfo.symbol}...`);
-        sentiment = await dexService.getSocialSentiment(fromTokenInfo.symbol);
-        console.error(`[SENTIMENT RESULT]: ${safeJsonStringify(sentiment)}`);
-      } else {
-        console.error("Skipping sentiment lookup - token symbol unresolved.");
-      }
-
-      const finalAnalysisReport = riskEngine.analyzeRoute(quote, probe.probeImpact, probe.isLiveData, sentiment);
-      console.error(`[DETERMINISTIC ENGINE REPORT]: ${safeJsonStringify(finalAnalysisReport)}`);
-      
-      console.error("Generating natural language security summary...");
-      let aiBrief;
-      
-      try {
-        const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("LLM synthesis request connection timed out after 6 seconds")), 6000)
-        );
-        
-        aiBrief = await Promise.race([
-          riskLLM.synthesize(finalAnalysisReport),
-          timeoutPromise
-        ]) as any;
-      } catch (llmError: any) {
-        console.error(`[EXPLICIT ERROR CAUGHT - LLM CALL FAILED]: ${llmError.stack || llmError.message}`);
-        aiBrief = {
-          summary: `Route evaluated with safety score ${finalAnalysisReport.safetyScore}/100. Verification Status: ${finalAnalysisReport.status}. (AI Summary Generation Offline)`,
-          recommendedAction: finalAnalysisReport.status === "REJECTED" ? "Execution blocked by system policy." : "Proceed with extra routing slippage protection buffers.",
-          isLiveSynthesis: false
-        };
-      }
-
-      // Stripped isAiLive variable cleanly out of payload returned to actual callers
-      const fullResultPayload = {
-        ...finalAnalysisReport,
-        aiSummary: aiBrief.summary,
-        aiRecommendedAction: aiBrief.recommendedAction
-      };
-
-      console.error(`[FINAL PAYLOAD DISPATCHING]: ${safeJsonStringify(fullResultPayload)}`);
-
-      return {
-        content: [{ type: "text", text: safeJsonStringify(fullResultPayload) }]
-      };
-
-    } catch (error: any) {
-      console.error(`[CRITICAL MCP TOOL EXCEPTION]: ${error.stack || error.message}`);
-      return {
-        content: [{ type: "text", text: `Internal MCP Server Error: ${error.message}` }],
-        isError: true
-      };
-    }
+    });
   });
 
   return server;
@@ -315,7 +318,8 @@ app.get("/mcp", (req, res) => {
     sessionClientIdentifiers.set(sessionId, String(clientId));
   }
 
-  const sessionServer = buildMcpServer();
+  // Pass session ID down dynamically to link scope execution
+  const sessionServer = buildMcpServer(sessionId);
 
   activeTransports.set(sessionId, transport);
   activeServers.set(sessionId, sessionServer);
@@ -394,7 +398,8 @@ if (process.env.RUN_EXPRESS === "true" || process.env.NODE_ENV === "production")
   });
 } else {
   const transport = new StdioServerTransport();
-  const localServer = buildMcpServer();
+  // Pass dynamic fallback ID for local testing
+  const localServer = buildMcpServer("local-session");
   localServer.connect(transport).catch((error) => {
     console.error("Failed to connect standard transport:", error);
   });
